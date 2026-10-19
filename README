@@ -30,4 +30,9 @@ KNOWN ISSUES
 Only works when the keyboard layout is set to german.
 Shift and the Numeric Keypad Decimal Operator don't send a dot.
 
+SOURCE CODE ORIGIN
+
+The original source code by Dennis Felsing (r0q) can be downloaded at [2]. I modified it to fix bugs with key up/down events and to enable typing a backtick with the layout.
+
 [1] http://simon.spruenker.de/dvorak/
+[2] https://sourceforge.net/projects/dva/reviews/
