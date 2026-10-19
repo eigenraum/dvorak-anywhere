@@ -1,0 +1,33 @@
+                                dvorakAnywhere
+
+INTRODUCTION
+
+dvorakAnywhere emulates a variant of the German Dvorak Type II on Windows, see
+[1] for more information in german. It can be used on public computers, where
+you are not allowed to change to your own keyboard layout.
+
+If you are having any problems with dvorakAnywhere (dva) please contact us
+using the users mailing list or per e-mail.
+
+USAGE
+
+To use dvorakAnywhere just run the executable. A small window will show up.
+From now you can use a variant of the German Dvorak II layout. By killing the
+window (e.g. click on [X]) you can stop dvorakAnywhere.
+
+COMPATIBILITY
+
+dva should run on any Windows NT based Operating System (NT, 2000, XP, Vista).
+Except from Windows there are no dependencies.
+
+COMPILATION
+
+I compile the binaries using the Gnu C++ Compiler (g++), but any other C++
+compiler for Windows should also work.
+
+KNOWN ISSUES
+
+Only works when the keyboard layout is set to german.
+Shift and the Numeric Keypad Decimal Operator don't send a dot.
+
+[1] http://simon.spruenker.de/dvorak/
