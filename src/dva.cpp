@@ -22,6 +22,10 @@
 #include <string>
 #include <windows.h>
 
+#ifndef MAPVK_VK_TO_VSC
+#define MAPVK_VK_TO_VSC 0
+#endif
+
 const std::string NAME("dva");
 const std::string VERSION("0.2");
 
@@ -79,17 +83,28 @@ int WINAPI WinMain(
         hInstance,              // application handle
         NULL);                  // used with multiple windows, NULL
 
+    if (hWnd == NULL)
+    {
+        MessageBox(NULL, "Could not install the keyboard hook.",
+            NAME.c_str(), MB_ICONERROR);
+        return 1;
+    }
+
     ShowWindow(hWnd, nCmdShow);
 
     MSG msg;
+    BOOL result;
 
-    while (GetMessage(&msg, NULL, 0, 0))
+    while ((result = GetMessage(&msg, NULL, 0, 0)) != 0)
     {
+        if (result == -1)
+            return 1;
+
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
-    return msg.wParam;
+    return (int)msg.wParam;
 }
 
 LRESULT CALLBACK WindowProc(
@@ -106,14 +121,20 @@ LRESULT CALLBACK WindowProc(
                 13 /*WH_KEYBOARD_LL*/, 
                 (HOOKPROC) KeyboardProc, 
                 GetModuleHandle(NULL), 0);
-            break;
+
+            // returning -1 makes CreateWindowEx fail
+            return hKeyHook == NULL ? -1 : 0;
         }
 
         case WM_DESTROY:
         {
+            if (hKeyHook != NULL)
+            {
+                UnhookWindowsHookEx(hKeyHook);
+                hKeyHook = NULL;
+            }
             PostQuitMessage(0);
             return 0;
-            break;
         }
 
         default:
@@ -162,7 +183,7 @@ void processGermanDvorakII(
         case 0xdb /*ß*/: vkey = 0xbb /*+*/; break;
         case 0xdd /*´*/:
         {
-            if (isDownAltGr()) write = 2;
+            if (isDownAltGr()) unicodeCharacter = 96 /*`*/;
             else vkey = 0xe2 /*<*/; 
             break;
         }
@@ -308,111 +329,168 @@ void processGermanDvorakII(
         default: write = 0;
     }
 }
+// What the last key-down of each physical key was turned into, so that the
+// matching key-up releases the right key.
+const int KEY_UNCHANGED  = 0;     // passed through (or not held down)
+const int KEY_SUPPRESSED = 0x100; // swallowed, nothing to release
+// any other value: the virtual key that was injected instead
+int keyState[256];
+
+void addKey(INPUT* inputs, int& count, WORD vk, bool up)
+{
+    INPUT& input = inputs[count++];
+    ZeroMemory(&input, sizeof(INPUT));
+    input.type       = INPUT_KEYBOARD;
+    input.ki.wVk     = vk;
+    input.ki.wScan   = (WORD)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+    input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+    if (vk == VK_RMENU || vk == VK_RCONTROL)
+        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+}
+
+void addUnicode(INPUT* inputs, int& count, WCHAR character, bool up)
+{
+    INPUT& input = inputs[count++];
+    ZeroMemory(&input, sizeof(INPUT));
+    input.type       = INPUT_KEYBOARD;
+    input.ki.wScan   = character;
+    input.ki.dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0);
+}
+
+struct Modifier
+{
+    WORD vk;
+    bool isDown; // currently held, so it has to be released temporarily
+};
+
+void addModifier(Modifier* modifiers, int& count, WORD vk, bool isDown)
+{
+    modifiers[count].vk = vk;
+    modifiers[count].isDown = isDown;
+    count++;
+}
+
 LRESULT CALLBACK KeyboardProc (int nCode, WPARAM wParam, LPARAM lParam)
 {
-    KBDLLHOOKSTRUCT * pKbHS = (KBDLLHOOKSTRUCT*)lParam; // the pressed key
-    int  vkey  = pKbHS->vkCode; // key code that will be simulated
+    // forward
+    if (nCode < 0)
+        return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
 
-    int  write = 0; // write default key (0), our key (1) or no key (2)
+    KBDLLHOOKSTRUCT * pKbHS = (KBDLLHOOKSTRUCT*)lParam; // the pressed key
+
+    // ignore keys we injected
+    if ((pKbHS->flags & LLKHF_INJECTED) || pKbHS->vkCode > 0xff)
+        return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
+
+    int& state = keyState[pKbHS->vkCode];
+    INPUT inputs[16];
+    int   inputCount = 0;
+
+    if ((wParam == WM_KEYUP) || (wParam == WM_SYSKEYUP))
+    {
+        int previous = state;
+        state = KEY_UNCHANGED;
+
+        if (previous == KEY_UNCHANGED)
+            return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
+
+        if (previous != KEY_SUPPRESSED)
+        {
+            addKey(inputs, inputCount, (WORD)previous, true);
+            SendInput(inputCount, inputs, sizeof(INPUT));
+        }
+        return 1;
+    }
+
+    int  vkey  = pKbHS->vkCode; // key code that will be simulated
+    int  write = 1; // write default key (0), our key (1) or no key (2)
     // set to unicode value to write values not on keyboard
     int  unicodeCharacter = -1;
     // AltGr (Control + Alt) on when off, off when on
     bool toggleAltGr = false;
     bool toggleShift = false; // same for Shift
 
-    // possible flags for Shift, Control, Alt, AltGr  
-    const int ownFlags[2] = {0, KEYEVENTF_KEYUP};
-    // default: press, then release
-    const int* pAltGrFlags[2] = {&ownFlags[0], &ownFlags[1]};
-    // same for Shift
-    const int* pShiftFlags[2] = {&ownFlags[0], &ownFlags[1]};
+    processGermanDvorakII(
+        pKbHS->vkCode, 
+        write, 
+        vkey,
+        unicodeCharacter, 
+        toggleAltGr, 
+        toggleShift);
 
-    // forward
-    if (nCode < 0)
-        return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
+    int newState = KEY_UNCHANGED;
+    if (write == 2 || (write == 1 && unicodeCharacter != -1))
+        newState = KEY_SUPPRESSED;
+    else if (write == 1)
+        newState = vkey;
 
-    // ignore keys we injected
-    if (pKbHS->flags & LLKHF_INJECTED)
-        return 0;
-
-    // process
-    else if ((wParam == WM_KEYDOWN) || (wParam == WM_SYSKEYDOWN))
-    {
-        write = 1;
-
-        processGermanDvorakII(
-            pKbHS->vkCode, 
-            write, 
-            vkey,
-            unicodeCharacter, 
-            toggleAltGr, 
-            toggleShift);
-    }
+    // the mapping changed while the key is held (e.g. a modifier was
+    // pressed during auto-repeat), so release the previously injected key
+    if (state != KEY_UNCHANGED && state != KEY_SUPPRESSED && state != newState)
+        addKey(inputs, inputCount, (WORD)state, true);
+    state = newState;
 
     if (write == 1)
     {
         // send characters that are not on keyboard
         if (unicodeCharacter != -1)
         {
-            KEYBDINPUT  kb={0};
-            INPUT    Input={0};
-
-            ::ZeroMemory(&kb,sizeof(KEYBDINPUT));
-            ::ZeroMemory(&Input,sizeof(INPUT));
-            kb.dwFlags  =  KEYEVENTF_UNICODE;
-            kb.wVk      =  0;
-            kb.wScan    = (WORD)unicodeCharacter;
-            Input.type  =  INPUT_KEYBOARD;
-            Input.ki    =  kb;
-            ::SendInput(1,&Input,sizeof(Input));
+            addUnicode(inputs, inputCount, (WCHAR)unicodeCharacter, false);
+            addUnicode(inputs, inputCount, (WCHAR)unicodeCharacter, true);
         }
         else
         {
-            // Although AltGr has the same effect as Control + Alt it is not
-            // the same on german keyboards, so we have to save whether 
-            // Control + Alt were pressed instead of AltGr.
-            bool isAltControl = false;
+            Modifier modifiers[5];
+            int      modifierCount = 0;
 
             if (toggleAltGr) // swapping AltGr
             {
-                if (isDownAltGr())
+                // Although AltGr has the same effect as Control + Alt it is
+                // not the same on german keyboards, so release whichever
+                // keys are actually held.
+                if (isDown(VK_RMENU))
+                    addModifier(modifiers, modifierCount, VK_RMENU, true);
+                else if (isDown(VK_LMENU) && isDown(VK_CONTROL))
                 {
-                    pAltGrFlags[1] = &ownFlags[0];
-                    pAltGrFlags[0] = &ownFlags[1];
-                }
-                if (isDown(VK_LMENU) && isDown(VK_CONTROL))
-                {
-                    isAltControl = true;
-                    keybd_event(VK_LMENU, 0x45, *pAltGrFlags[0], 0);
-                    keybd_event(VK_CONTROL, 0x45, *pAltGrFlags[0], 0);
+                    addModifier(modifiers, modifierCount, VK_LMENU, true);
+                    if (isDown(VK_LCONTROL))
+                        addModifier(modifiers, modifierCount, VK_LCONTROL, true);
+                    if (isDown(VK_RCONTROL))
+                        addModifier(modifiers, modifierCount, VK_RCONTROL, true);
                 }
                 else
-                    keybd_event(VK_RMENU, 0x45, *pAltGrFlags[0], 0);
+                    addModifier(modifiers, modifierCount, VK_RMENU, false);
             }
 
             if (toggleShift) // swapping Shift
             {
                 if (isDown(VK_SHIFT))
                 {
-                    pShiftFlags[1] = &ownFlags[0];
-                    pShiftFlags[0] = &ownFlags[1];
+                    if (isDown(VK_LSHIFT))
+                        addModifier(modifiers, modifierCount, VK_LSHIFT, true);
+                    if (isDown(VK_RSHIFT))
+                        addModifier(modifiers, modifierCount, VK_RSHIFT, true);
                 }
-                keybd_event(VK_SHIFT, 0x45, *pShiftFlags[0], 0);
+                else
+                    addModifier(modifiers, modifierCount, VK_LSHIFT, false);
             }
+
+            for (int i = 0; i < modifierCount; i++)
+                addKey(inputs, inputCount, modifiers[i].vk, modifiers[i].isDown);
 
             // write
-            keybd_event(vkey, pKbHS->scanCode, pKbHS->flags, 0);
+            addKey(inputs, inputCount, (WORD)vkey, false);
 
-            if (isAltControl)
-            {
-                keybd_event(VK_LMENU, 0x45, *pAltGrFlags[1], 0);
-                keybd_event(VK_CONTROL, 0x45, *pAltGrFlags[1], 0);
-            }
-            else if (toggleAltGr)
-                keybd_event(VK_RMENU, 0x45, *pAltGrFlags[1], 0);
-            if (toggleShift)
-                keybd_event(VK_SHIFT, 0x45, *pShiftFlags[1], 0);
+            for (int i = modifierCount - 1; i >= 0; i--)
+                addKey(inputs, inputCount, modifiers[i].vk, !modifiers[i].isDown);
         }
     }
-    return write;
+
+    if (inputCount > 0)
+        SendInput(inputCount, inputs, sizeof(INPUT));
+
+    if (write == 0)
+        return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
+
+    return 1;
 }
