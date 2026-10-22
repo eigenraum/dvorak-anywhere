@@ -34,5 +34,12 @@ SOURCE CODE ORIGIN
 
 The original source code by Dennis Felsing (r0q) can be downloaded at [2]. I modified it to fix bugs with key up/down events and to enable typing a backtick with the layout.
 
+SPECIAL FEATURES
+
+This fork of dva extends the original dva [2] in two aspects:
+  - remaps caps lock to ctrl
+  - maps AltGr + 's'/'d' key to <>
+  - maps altGR + backtick-key to backtick
+
 [1] http://simon.spruenker.de/dvorak/
 [2] https://sourceforge.net/projects/dva/reviews/
