@@ -19,15 +19,14 @@
  */
 
 #define _WIN32_WINNT 0x0501 // required for SendInput
-#include <string>
 #include <windows.h>
 
 #ifndef MAPVK_VK_TO_VSC
 #define MAPVK_VK_TO_VSC 0
 #endif
 
-const std::string NAME("dva");
-const std::string VERSION("0.2");
+#define NAME    "dva"
+#define VERSION "0.2"
 
 HHOOK hKeyHook;
 
@@ -42,6 +41,17 @@ LRESULT CALLBACK KeyboardProc (int, WPARAM, LPARAM);
 bool isDown(int key)
 {
     return GetAsyncKeyState(key) < 0;
+}
+
+// Control keys pressed by the user. AltGr makes Windows fake a left Control
+// (scan code 0x21d), which must not count as a real Ctrl.
+bool realLCtrl = false;
+bool realRCtrl = false;
+bool capsCtrl  = false; // Caps Lock is remapped to Control
+
+bool isRealCtrlDown()
+{
+    return realLCtrl || realRCtrl || capsCtrl;
 }
 
 bool isDownAltGr()
@@ -72,7 +82,7 @@ int WINAPI WinMain(
     hWnd = CreateWindowEx(
         0,
         "dva", // name of the window class
-        (NAME + " " + VERSION).c_str(),   // title of the window
+        NAME " " VERSION,       // title of the window
         WS_SYSMENU,             // window style
         CW_USEDEFAULT,          // x-position of the window
         CW_USEDEFAULT,          // y-position of the window
@@ -86,7 +96,7 @@ int WINAPI WinMain(
     if (hWnd == NULL)
     {
         MessageBox(NULL, "Could not install the keyboard hook.",
-            NAME.c_str(), MB_ICONERROR);
+            NAME, MB_ICONERROR);
         return 1;
     }
 
@@ -151,7 +161,8 @@ void processGermanDvorakII(
     int& vkey, 
     int& unicodeCharacter, 
     bool& toggleAltGr, 
-    bool& toggleShift)
+    bool& toggleShift,
+    bool& holdCtrl)
 {
     switch (oVkey)
     {
@@ -183,7 +194,20 @@ void processGermanDvorakII(
         case 0xdb /*ß*/: vkey = 0xbb /*+*/; break;
         case 0xdd /*´*/:
         {
-            if (isDownAltGr()) unicodeCharacter = 96 /*`*/;
+            if (isDownAltGr())
+            {
+                // A Unicode packet is not a real key, so shortcuts such as
+                // Ctrl+` never match. With Ctrl held send the key that
+                // applications bind to ` on a german layout (Ö) instead,
+                // without AltGr.
+                if (isRealCtrlDown())
+                {
+                    vkey = 0xc0 /*Ö*/;
+                    toggleAltGr = true;
+                    holdCtrl = true;
+                }
+                else unicodeCharacter = 96 /*`*/;
+            }
             else vkey = 0xe2 /*<*/; 
             break;
         }
@@ -251,8 +275,30 @@ void processGermanDvorakII(
             if (isDownAltGr()) vkey = (int)'Q';
             break;
         }
-        case   (int)'S': vkey =   (int)'O'; break;
-        case   (int)'D': vkey =   (int)'E'; break;
+        case   (int)'S':
+        {
+            if (isDownAltGr())
+            {
+                // < : the <> key without AltGr and without Shift
+                vkey = 0xe2 /*<*/;
+                toggleAltGr = true;
+                toggleShift = isDown(VK_SHIFT);
+            }
+            else vkey =   (int)'O';
+            break;
+        }
+        case   (int)'D':
+        {
+            if (isDownAltGr())
+            {
+                // > : the <> key with Shift and without AltGr
+                vkey = 0xe2 /*<*/;
+                toggleAltGr = true;
+                toggleShift = !isDown(VK_SHIFT);
+            }
+            else vkey =   (int)'E';
+            break;
+        }
         case   (int)'F': 
         {
             if (isDownAltGr()) vkey = 0xe2 /*<*/;
@@ -326,6 +372,8 @@ void processGermanDvorakII(
         case 0xbe /*.*/: vkey =   (int)'V'; break;
         case 0xbd /*-*/: vkey = 0xbf /*#*/; break;
 
+        case VK_CAPITAL: vkey = VK_LCONTROL; break;
+
         default: write = 0;
     }
 }
@@ -382,6 +430,13 @@ LRESULT CALLBACK KeyboardProc (int nCode, WPARAM wParam, LPARAM lParam)
     if ((pKbHS->flags & LLKHF_INJECTED) || pKbHS->vkCode > 0xff)
         return CallNextHookEx(hKeyHook, nCode, wParam, lParam);
 
+    if (pKbHS->vkCode == VK_LCONTROL && pKbHS->scanCode != 0x21d)
+        realLCtrl = !(wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+    else if (pKbHS->vkCode == VK_RCONTROL)
+        realRCtrl = !(wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+    else if (pKbHS->vkCode == VK_CAPITAL)
+        capsCtrl = !(wParam == WM_KEYUP || wParam == WM_SYSKEYUP);
+
     int& state = keyState[pKbHS->vkCode];
     INPUT inputs[16];
     int   inputCount = 0;
@@ -409,6 +464,7 @@ LRESULT CALLBACK KeyboardProc (int nCode, WPARAM wParam, LPARAM lParam)
     // AltGr (Control + Alt) on when off, off when on
     bool toggleAltGr = false;
     bool toggleShift = false; // same for Shift
+    bool holdCtrl = false; // keep Control pressed while AltGr is released
 
     processGermanDvorakII(
         pKbHS->vkCode, 
@@ -416,7 +472,8 @@ LRESULT CALLBACK KeyboardProc (int nCode, WPARAM wParam, LPARAM lParam)
         vkey,
         unicodeCharacter, 
         toggleAltGr, 
-        toggleShift);
+        toggleShift,
+        holdCtrl);
 
     int newState = KEY_UNCHANGED;
     if (write == 2 || (write == 1 && unicodeCharacter != -1))
@@ -477,6 +534,10 @@ LRESULT CALLBACK KeyboardProc (int nCode, WPARAM wParam, LPARAM lParam)
 
             for (int i = 0; i < modifierCount; i++)
                 addKey(inputs, inputCount, modifiers[i].vk, modifiers[i].isDown);
+
+            // releasing AltGr also releases the Control it implies
+            if (holdCtrl)
+                addKey(inputs, inputCount, VK_LCONTROL, false);
 
             // write
             addKey(inputs, inputCount, (WORD)vkey, false);
